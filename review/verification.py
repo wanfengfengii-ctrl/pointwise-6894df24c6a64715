@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
-from archive.artifacts import CaptureNotFound
+from archive.artifacts import CaptureNotFound, DiagnosticNotFound
+from archive.certificate import validate_certificate
 from archive.storage import ArchiveError, SqliteArchive
 from review.export import HandoverRecord
 from review.parameters import QueryParameterError
@@ -54,3 +55,25 @@ def verify_export(
     ):
         mismatches.append('combinations')
     return VerificationResult(tuple(mismatches))
+
+
+def _certificate_groups(value: object) -> object:
+    return value if type(value) in (list, tuple) else None
+
+
+def verify_rejection(archive: SqliteArchive, record: object, expected_diagnostic_id: str) -> bool:
+    """按指定诊断号读取冻结证据，独立验算任一有效矛盾证书。"""
+    if type(record) is not dict:
+        return False
+    if type(expected_diagnostic_id) is not str or not expected_diagnostic_id:
+        return False
+    try:
+        frozen = archive.get_diagnostic(expected_diagnostic_id)
+    except (ArchiveError, DiagnosticNotFound):
+        return False
+    if record.get('diagnostic_id') != expected_diagnostic_id or frozen.diagnostic_id != expected_diagnostic_id:
+        return False
+    groups = _certificate_groups(record.get('groups'))
+    if groups is None:
+        return False
+    return validate_certificate(frozen.evidence.frames, groups)

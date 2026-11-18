@@ -11,7 +11,7 @@ python3 -B -S -m unittest discover -s tests -v
 python3 -B -S demo.py
 ```
 
-样例从 `samples/` 读取巡检录制，在临时目录建立归档。普通录制确定了 x=0、y=1。初次巡检只能确认联合值为 00、01、10。独立复测多取得一条 x=0，成果的联合值缩小为 00、01。演示关闭源和归档后，以原成果 ID 复核交接。
+样例从 `samples/` 读取巡检录制，在临时目录建立归档。普通录制确定了 x=0、y=1。初次巡检只能确认联合值为 00、01、10。独立复测多取得一条 x=0，成果的联合值缩小为 00、01。演示关闭源和归档后，以原成果 ID 复核交接。演示还用六帧无解录制展示实际诊断号、重开后导出的矛盾证书和独立复核结果。
 
 ## 录制和计证口径
 
@@ -32,28 +32,37 @@ python3 -B -S demo.py
 ## Python 接口
 
 ```python
-from archive.collect import capture
+from archive.collect import CaptureRejected, capture
 from archive.storage import SqliteArchive
 from plans.registry import PlanRegistry
 from recordings.batches import read_recording
 from recordings.source import RecordingSource
-from review.export import export
+from review.export import export, export_rejection
 from review.query import query
-from review.verification import verify_export
+from review.verification import verify_export, verify_rejection
 
 registry = PlanRegistry()
 plan = registry.register('station-12', 2, {'x': 1, 'y': 2})
 x, y = plan.catalog.get_mask('x'), plan.catalog.get_mask('y')
+proof_plan = registry.register('station-proof', 3, {'x': 1, 'y': 2, 'z': 4})
 
 with SqliteArchive.open('station.sqlite3') as archive:
     with RecordingSource('samples/survey.jsonl') as source:
         capture_id = capture(archive, plan, read_recording(source))
     possibilities = query(archive, capture_id, x, y)
     record = export(archive, capture_id, x, y)
+    diagnostic_id = None
+    try:
+        with RecordingSource('samples/rejection.jsonl') as source:
+            capture(archive, proof_plan, read_recording(source))
+    except CaptureRejected as rejected:
+        diagnostic_id = rejected.diagnostic_id  # 无解且诊断已提交时非 None
+    certificate = export_rejection(archive, diagnostic_id)
 
 with SqliteArchive.open('station.sqlite3') as archive:
     result = verify_export(archive, record, capture_id, x, y)
     assert result.matches
+    assert verify_rejection(archive, certificate, diagnostic_id)
 ```
 
 - `PlanRegistry.register(key, bit_width, loops)` 固定声明，相同内容返回原对象，回路表顺序无关。允许显式传入空字典。`PlanConflict` 表示无效或冲突的声明，`get(key)` 对未登记键报 `KeyError`。登记表随调用者进程管理，已交付成果内嵌原声明。
@@ -61,5 +70,13 @@ with SqliteArchive.open('station.sqlite3') as archive:
 - `capture(archive, plan, events)` 消费整批结束证据，成功时返回已提交的整数成果 ID。声明不匹配、身份冲突、无解释及写失败以 `CaptureRejected` 报告，录制错误使用 `RecordingError`。归档可选用 `before_commit` 回调做提交前检查，回调异常会回滚。回调收到的是事务内临时行号，成功提交后才成为成果 ID。独立读连接在提交前只能见到已提交成果。
 - `query(archive, capture_id, *masks)` 返回由整数元组组成的列表。成果不存在报 `CaptureNotFound`，损坏的归档数据报 `ArchiveError`，参数数目或掩码无效报 `QueryParameterError`。掩码按所选成果冻结的位宽校验。
 - `export(archive, capture_id, *masks)` 返回不可变交接记录，可通过 `as_dict()` 转为 JSON 可序列化数据。不可交付时报 `ExportError`。`verify_export` 用调用者约定的成果 ID 和掩码重算并比较身份、位宽、参数和联合值，通过 `matches` 与 `mismatches` 返回复核结果。
+- `export_rejection(archive, diagnostic_id)` 从已提交诊断导出 JSON 可序列化字典，含诊断号与由物理帧 ID 组成的矛盾证书 `groups`。诊断不存在或证据无效时报 `ExportError`。
+- `verify_rejection(archive, record, expected_diagnostic_id)` 按调用者指定的诊断号读取冻结证据，逐组核对帧身份、组内唯一、掩码异或为零与读值异或为一，并要求各组总交集为空；任一有效证书均可通过，与导出分组及顺序无关。
 
 首次打开空归档建立 SQLite 表。重复打开会检查归档格式并保留既有成果。同一采样键可有多份成功成果，各有自己的 ID。用户录制和本地声明由用户管理，打开归档只操作选定数据库。对固定成果的查询依赖归档内的声明和证据，原录制和登记器可在交付后关闭。
+
+## 拒绝诊断交接
+
+完整录制在全批至多一次读值失配下无解时，`capture` 在抛 `CaptureRejected` 前把原声明与完整封存帧原子写入归档，并通过异常的 `diagnostic_id` 给出独立诊断号。诊断提交边界有三点：录制必须先经开始、逐帧接纳与显式结束完整接纳；批次须在该规则下无解；诊断号只在其自身事务提交后才交给调用者。其他 `CaptureRejected` 的 `diagnostic_id` 为 `None`；截断或非法录制仍是 `RecordingError`。诊断写入或提交失败时照常报告采集拒绝，但不发号，也不留部分诊断行。旧版（版本 1）归档打开时补建诊断表，既有成果保持可读。
+
+物理帧身份沿用采样批次作用域：同一 ID 的原样重投保留首次行号、掩码与读值，改变内容则整批拒绝。诊断证据保存各帧的 `(行号, 帧 ID, 掩码, 读值)`，导出与复核只按帧 ID 引用物理帧，因此下一班即使移走原录制，仍能从归档导出并独立验算各组矛盾见证。归档为证据保存摘要绑定，证据内容或诊断号被改写时导出与复核都拒绝；矛盾证书的每组都取自这些冻结帧。

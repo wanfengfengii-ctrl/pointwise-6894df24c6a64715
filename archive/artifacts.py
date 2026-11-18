@@ -10,6 +10,12 @@ class CaptureNotFound(LookupError):
         super().__init__(f'成果 ID {capture_id!r} 不可用')
 
 
+class DiagnosticNotFound(LookupError):
+    def __init__(self, diagnostic_id: object) -> None:
+        self.diagnostic_id = diagnostic_id
+        super().__init__(f'诊断号 {diagnostic_id!r} 不可用')
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenCapture:
     capture_id: int

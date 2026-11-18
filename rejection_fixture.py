@@ -1,11 +1,15 @@
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from admission.capture import collect_evidence
+from archive.collect import CaptureRejected, capture
+from archive.storage import SqliteArchive
 from plans.registry import PlanRegistry
 from recordings.batches import read_recording
 from recordings.source import RecordingSource
+from review.export import export_rejection
 
 
 @contextmanager
@@ -62,7 +66,47 @@ def check_commit_control():
             raise AssertionError(f"提交控制未保全原行：{denied!r}, {rows!r}")
 
 
+def check_rejection_capture():
+    path = Path(__file__).resolve().parent / "samples" / "rejection.jsonl"
+    plan = PlanRegistry().register("station-proof", 3, {"x": 1, "y": 2, "z": 4})
+    with TemporaryDirectory() as directory:
+        database = Path(directory) / "diagnostics.sqlite3"
+        with SqliteArchive.open(database) as archive:
+            with closing(sqlite3.connect(database, isolation_level=None)) as connection:
+                wrapped = SqliteArchive(connection)
+                with deny_sqlite_commit(connection) as denied:
+                    with RecordingSource(path) as source:
+                        try:
+                            capture(wrapped, plan, read_recording(source))
+                        except CaptureRejected as exc:
+                            if exc.diagnostic_id is not None:
+                                raise AssertionError("诊断提交被拒绝时不应给出诊断号")
+                        else:
+                            raise AssertionError("样例应当被拒绝")
+                if denied != ["COMMIT"]:
+                    raise AssertionError(f"检查未命中诊断提交路径：{denied!r}")
+                if connection.in_transaction:
+                    raise AssertionError("拒绝提交后连接仍有未提交事务")
+            with RecordingSource(path) as source:
+                try:
+                    capture(archive, plan, read_recording(source))
+                except CaptureRejected as exc:
+                    diagnostic_id = exc.diagnostic_id
+                else:
+                    raise AssertionError("样例应当被拒绝")
+            if not isinstance(diagnostic_id, str) or not diagnostic_id:
+                raise AssertionError(f"无解拒绝未给出诊断号：{diagnostic_id!r}")
+            certificate = export_rejection(archive, diagnostic_id)
+            if certificate.get("diagnostic_id") != diagnostic_id:
+                raise AssertionError("导出诊断号与提交不符")
+            if certificate.get("groups") != [
+                ["a", "b", "c"], ["b", "d", "e"], ["a", "d", "f"],
+            ]:
+                raise AssertionError(f"样例证书与手算不符：{certificate!r}")
+
+
 if __name__ == "__main__":
     check_recording()
     check_commit_control()
-    print("录制夹具和 SQLite 提交控制校验通过")
+    check_rejection_capture()
+    print("录制夹具、SQLite 提交控制与诊断提交校验通过")

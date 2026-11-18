@@ -1,0 +1,8 @@
+{"type":"start","key":"station-proof","bit_width":3}
+{"type":"frame","frame_id":"a","mask":1,"value":0}
+{"type":"frame","frame_id":"b","mask":2,"value":0}
+{"type":"frame","frame_id":"c","mask":3,"value":1}
+{"type":"frame","frame_id":"d","mask":4,"value":0}
+{"type":"frame","frame_id":"e","mask":6,"value":1}
+{"type":"frame","frame_id":"f","mask":5,"value":1}
+{"type":"end"}
